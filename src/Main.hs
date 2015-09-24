@@ -110,15 +110,15 @@ main = do
 
   window <-
     SDL.createWindow
-      "Yamgine"
+      "Polaris Cover"
       SDL.defaultWindow {SDL.windowInitialSize = V2 screenWidth screenHeight,
                          SDL.windowOpenGL = Just SDL.defaultOpenGL}
   SDL.showWindow window
 
-  _ <- SDL.glCreateContext(window)
-
+  _ <- SDL.glCreateContext window
 
   let initPlayer = Player U.fpsCamera
+
   loop window initPlayer 0
 
   SDL.destroyWindow window
@@ -140,14 +140,13 @@ loop window player lastFrameTime = do
           Just e' -> (e' :) <$> collectEvents
 
   events <- map SDL.eventPayload <$> collectEvents
-  let quit = any (== SDL.QuitEvent) events
+  let quit = SDL.QuitEvent `elem` events
   keyboardEvents <- SDL.getKeyboardState
   let escapeButtonDown = keyboardEvents SDL.ScancodeEscape
 
   let playerData = gatherInputs keyboardEvents
   let updatedPlayer = updatePlayer playerData player moveSpeed rotateSpeed
 
-  let longVerts = map(+ L.V3 10 0 0)(map (* L.V3 1 3 1)(vertices cubeMesh))
   let longMesh = transformMesh cubeMesh (L.V3 10 0 0) (L.V3 1 3 1)
   let masterMesh = concatMesh longMesh cubeMesh
   resources <- initResources masterMesh
@@ -160,16 +159,15 @@ loop window player lastFrameTime = do
 updatePlayer :: PlayerInputData -> Player -> CFloat -> CFloat -> Player
 updatePlayer playerInput player moveSpeed rotateSpeed =
   Player updatedCam where
-    xMoveDelta = (v2XAccessor (playerPosition playerInput)* moveSpeed)
-    zMoveDelta = (v2YAccessor (playerPosition playerInput)* moveSpeed)
-    xRotateDelta =(realToFrac (v2XAccessor (-(playerRotation playerInput))) * rotateSpeed)
-    yRotateDelta = (realToFrac (v2YAccessor (playerRotation playerInput))   * rotateSpeed)
-    --this is ugly, how do we do vector * scalar?
-    newPos = ((U.rightward (cam player)) * (L.V3  xMoveDelta xMoveDelta xMoveDelta))
-             +((U.forward (cam player)) * (L.V3 zMoveDelta zMoveDelta zMoveDelta))
-    updatedCam = U.dolly(newPos) .
+    xMoveDelta =   realToFrac (v2XAccessor (playerPosition playerInput)* moveSpeed)
+    zMoveDelta =   realToFrac (v2YAccessor (playerPosition playerInput)* moveSpeed)
+    xRotateDelta = realToFrac (v2XAccessor (-(playerRotation playerInput))) * rotateSpeed
+    yRotateDelta = realToFrac (v2YAccessor (playerRotation playerInput))   * rotateSpeed
+    newPos = U.rightward (cam player) ^* xMoveDelta
+             + U.forward (cam player) ^* zMoveDelta
+    updatedCam = U.dolly newPos .
                  U.pan xRotateDelta .
-                 U.tilt yRotateDelta $ (cam player)  --U.pan for left/right rotation, U.tilt for up/down rotation
+                 U.tilt yRotateDelta $ cam player  --U.pan for left/right rotation, U.tilt for up/down rotation
 
 
 --smooth inputs vs raw inputs, probably need to wrap this function to do that
