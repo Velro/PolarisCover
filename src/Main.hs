@@ -13,7 +13,6 @@
 
 --TOLEARN
 {-
-  -Learn "correct way" to access V2 members
   -maybe switch to Template Haskell or Vinyl implementation
   -understand weird Resources constructor
   -<*> and <$>
@@ -117,7 +116,7 @@ main = do
 
   _ <- SDL.glCreateContext window
 
-  let initPlayer = Player U.fpsCamera
+  let initPlayer = Player (U.dolly (L.V3 0 0 (10)) $ U.fpsCamera)
 
   loop window initPlayer 0
 
@@ -157,14 +156,14 @@ loop window player lastFrameTime = do
   unless (quit || escapeButtonDown) (loop window updatedPlayer time)
 
 updatePlayer :: PlayerInputData -> Player -> CFloat -> CFloat -> Player
-updatePlayer playerInput player moveSpeed rotateSpeed =
+updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) player moveSpeed rotateSpeed =
   Player updatedCam where
-    xMoveDelta =   realToFrac (v2XAccessor (playerPosition playerInput)* moveSpeed)
-    zMoveDelta =   realToFrac (v2YAccessor (playerPosition playerInput)* moveSpeed)
-    xRotateDelta = realToFrac (v2XAccessor (-(playerRotation playerInput))) * rotateSpeed
-    yRotateDelta = realToFrac (v2YAccessor (playerRotation playerInput))   * rotateSpeed
-    newPos = U.rightward (cam player) ^* xMoveDelta
-             + U.forward (cam player) ^* zMoveDelta
+    xMoveDelta =   realToFrac (moveX * moveSpeed)
+    zMoveDelta =   realToFrac (moveY * moveSpeed)
+    xRotateDelta = realToFrac (-rotateX) * rotateSpeed
+    yRotateDelta = realToFrac rotateY * rotateSpeed
+    newPos = U.rightward (cam player) * xMoveDelta
+             + U.forward (cam player) * zMoveDelta
     updatedCam = U.dolly newPos .
                  U.pan xRotateDelta .
                  U.tilt yRotateDelta $ cam player  --U.pan for left/right rotation, U.tilt for up/down rotation
@@ -283,19 +282,3 @@ transformMesh :: Mesh -> L.V3 Float -> L.V3 Float -> Mesh
 transformMesh mesh position scale =
   Mesh newVertices (indices mesh) (colors mesh) where
     newVertices = map((+ position) . (* scale))(vertices mesh)
---v2
-v2XAccessor :: L.V2 CFloat -> CFloat
-v2XAccessor (L.V2 x _) = x
-
-v2YAccessor :: L.V2 CFloat -> CFloat
-v2YAccessor (L.V2 _ y) = y
-
---v3
-v3XAccessor :: L.V3 Float -> Float
-v3XAccessor (L.V3 x _ _) = x
-
-v3YAccessor :: L.V3 Float -> Float
-v3YAccessor (L.V3 _ y _) = y
-
-v3ZAccessor :: L.V3 Float -> Float
-v3ZAccessor (L.V3 _ _ z) = z
