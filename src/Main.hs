@@ -9,6 +9,8 @@
     - scale/rotate/move based on tree structure
     - compress matrix transform
     - recurse through tree from bottom to top?
+    - transform, rotate, scale matrix transformation
+  -reinstall packages with profiling support https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/profiling.html
 -}
 
 --TOLEARN
@@ -38,6 +40,7 @@ import Control.Monad hiding (mapM_)
 import Data.Foldable
 import Data.Maybe
 import Data.Monoid
+import Data.List as List
 import Control.Monad
 import Data.Foldable (for_)
 import Foreign.C.Types
@@ -52,6 +55,7 @@ import           System.FilePath ((</>))
 
 import SDL (($=))
 import qualified SDL
+import qualified SDL.Mixer as Mix
 import Graphics.Rendering.OpenGL as GL
 import Graphics.Rendering.OpenGL (($=))
 import qualified Graphics.GLUtil as U
@@ -59,14 +63,19 @@ import qualified Graphics.GLUtil.Camera3D as U
 import qualified Linear as L
 import Data.Fixed
 
+import qualified System.Random as R
+
 screenWidth, screenHeight :: CInt
 (screenWidth, screenHeight) = (640, 480)
+
+
 
 screenWidthInt, screenHeightInt :: Int
 (screenWidthInt, screenHeightInt) = (640, 480)
 
 {- Not necessary until more complex input
---todo switch to some sort of Enum
+--this seems like a good fit for FRP
+--TODO switch to some sort of Enum
 -- | 2  = isDown
 -- | 1  = OnDown
 -- | 0  = isUp
@@ -82,7 +91,8 @@ data PlayerInputData = PlayerInputData { playerPosition :: V2 CFloat -- x , z
                                        , playerRotation :: V2 CFloat -- pan , tilt
                                        }
 
-data Player = Player { cam :: U.Camera CFloat
+data Player = Player { cam :: U.Camera CFloat --should be Transform composed with a Camera
+                      , lastFrameInput :: PlayerInputData
                      }
 
 
@@ -98,10 +108,14 @@ data Mesh = Mesh {vertices :: [L.V3 Float]
                  ,colors :: [L.V3 Float]
                  }
 
+data Transform = Transform {t_position :: V3 CFloat
+                           ,t_rotation :: Quaternion CFloat --should this be a higher precision?
+                           ,t_scale :: V3 CFloat
+                           }
 
 main :: IO ()
 main = do
-  SDL.initialize [SDL.InitVideo]
+  SDL.initialize [SDL.InitVideo, SDL.InitAudio]
   SDL.HintRenderScaleQuality $= SDL.ScaleLinear
   do renderQuality <- SDL.get SDL.HintRenderScaleQuality
      when (renderQuality /= SDL.ScaleLinear) $
@@ -116,21 +130,32 @@ main = do
 
   _ <- SDL.glCreateContext window
 
-  let initPlayer = Player (U.dolly (L.V3 0 0 (10)) $ U.fpsCamera)
+  let initPlayer = Player (U.dolly (L.V3 0 0 10) U.fpsCamera) (PlayerInputData (L.V2 0 0) (L.V2 0 0))
 
-  loop window initPlayer 0
+  gen <- R.getStdGen
+  let (rando, newGen) = R.randomR ((-10), 10) gen
+  do R.setStdGen newGen
+  let longMesh = transformMesh cubeMesh (L.V3 rando 0 0) (L.V3 1 3 1)
+  let masterMesh = concatMesh longMesh cubeMesh
+
+  Mix.withAudio Mix.defaultAudio 256 $ do
+    print =<< Mix.musicDecoders
+    music <- Mix.load "Riddlydiddly.wav"
+    print $ Mix.musicType music
+    Mix.playMusic Mix.Forever music
+    loop window initPlayer 0 masterMesh
+    Mix.free music
 
   SDL.destroyWindow window
   SDL.quit
 
-
 --eventually just deltaTime, inputStruct, and entity list?
-loop :: SDL.Window -> Player -> CFloat -> IO ()
-loop window player lastFrameTime = do
+loop :: SDL.Window -> Player -> CFloat -> Mesh -> IO ()
+loop window player lastFrameTime mesh = do
   time <- SDL.time--maybe we can find this with SDL timers?
   let deltaTime = (time - lastFrameTime) `mod'` 1 --mod by 1 because the second or third frame comes up with a deltaTime in the thousands...
   let moveSpeed = deltaTime * 10
-  let rotateSpeed = deltaTime * 30
+  let rotateSpeed = deltaTime * 100
 
   let collectEvents = do
         e <- SDL.pollEvent
@@ -143,21 +168,21 @@ loop window player lastFrameTime = do
   keyboardEvents <- SDL.getKeyboardState
   let escapeButtonDown = keyboardEvents SDL.ScancodeEscape
 
-  let playerData = gatherInputs keyboardEvents
-  let updatedPlayer = updatePlayer playerData player moveSpeed rotateSpeed
+  let rawInputs = gatherInputsRaw keyboardEvents
+  let smoothPlayer = smoothedPlayer (lastFrameInput player) rawInputs (deltaTime/2)
+  let updatedPlayer = updatePlayer smoothPlayer player moveSpeed rotateSpeed
 
-  let longMesh = transformMesh cubeMesh (L.V3 10 0 0) (L.V3 1 3 1)
-  let masterMesh = concatMesh longMesh cubeMesh
-  resources <- initResources masterMesh
-  draw resources masterMesh updatedPlayer
+  resources <- initResources mesh
+  draw resources mesh updatedPlayer
 
   SDL.glSwapWindow window
 
-  unless (quit || escapeButtonDown) (loop window updatedPlayer time)
+  unless (quit || escapeButtonDown) (loop window updatedPlayer time mesh)
+
 
 updatePlayer :: PlayerInputData -> Player -> CFloat -> CFloat -> Player
 updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) player moveSpeed rotateSpeed =
-  Player updatedCam where
+  Player updatedCam (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) where
     xMoveDelta =   realToFrac (moveX * moveSpeed)
     zMoveDelta =   realToFrac (moveY * moveSpeed)
     xRotateDelta = realToFrac (-rotateX) * rotateSpeed
@@ -166,12 +191,39 @@ updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) player 
              + U.forward (cam player) * zMoveDelta
     updatedCam = U.dolly newPos .
                  U.pan xRotateDelta .
-                 U.tilt yRotateDelta $ cam player  --U.pan for left/right rotation, U.tilt for up/down rotation
+                 U.tilt yRotateDelta $ cam player
 
+
+--how can pattern between smoothedPlayer and v2MoveTowards be represented "the haskell way"
+
+
+--smoothing delta should eventually be per Axis, bundled in some Input struct
+smoothedPlayer :: PlayerInputData -> PlayerInputData -> CFloat -> PlayerInputData
+smoothedPlayer (PlayerInputData oldMove oldRotate) (PlayerInputData rawMove rawRotate) maxDelta =
+  PlayerInputData resultMove resultRotate where
+    resultMove = v2MoveTowards oldMove rawMove maxDelta
+    resultRotate = v2MoveTowards oldRotate rawRotate maxDelta
+
+--zip (toList (L.V3 1 2 3)) (toList (L.V3 4 5 6)) to create [(1,7),(2,8),(3,9)]
+v2MoveTowards :: (Num a, Ord a) => L.V2 a -> L.V2 a -> a -> L.V2 a
+v2MoveTowards (V2 lastValueX lastValueY) (V2 targetValueX targetValueY) maxDelta =
+  L.V2 resultX resultY where
+    resultX = moveTowards lastValueX targetValueX maxDelta
+    resultY = moveTowards lastValueY targetValueY maxDelta
+
+moveTowards :: (Num a, Ord a) => a -> a -> a -> a
+moveTowards lastValue target maxDelta =
+  let
+    sign = signum target
+    result = lastValue + (maxDelta * sign)
+  in
+    if abs(result) > abs(target)
+    then target
+    else result
 
 --smooth inputs vs raw inputs, probably need to wrap this function to do that
-gatherInputs :: (SDL.Scancode -> Bool) -> PlayerInputData
-gatherInputs  events =
+gatherInputsRaw :: (SDL.Scancode -> Bool) -> PlayerInputData
+gatherInputsRaw events =
   PlayerInputData (V2 updatedMoveX updatedMoveZ) (V2 updatedRotateX updatedRotateY) where
   updatedMoveX = if | events SDL.ScancodeA -> -1
                     | events SDL.ScancodeD -> 1
@@ -185,6 +237,8 @@ gatherInputs  events =
   updatedRotateY = if | events SDL.ScancodeUp -> 1
                       | events SDL.ScancodeDown -> -1
                       | otherwise -> 0
+
+
 
 initResources :: Mesh -> IO Resources
 initResources newMesh = do
@@ -205,7 +259,7 @@ initResources newMesh = do
 draw :: Resources -> Mesh -> Player -> IO ()
 draw r mesh player = do
     GL.clearColor $= GL.Color4 1 1 1 1
-    GL.depthFunc $= Just GL.Less
+    --GL.depthFunc $= Just GL.Less
     GL.clear [GL.ColorBuffer, GL.DepthBuffer]
     -- In C++ example GLUT handles resizing the viewport?
     --(width, height) <- GLFW.getFramebufferSize win
@@ -249,6 +303,10 @@ cubeVertices = L.V3 <$> [1, -1] <*> [1, -1] <*> [1, -1]
 cubeColors :: [L.V3 Float]
 cubeColors = L.V3 <$> [1, 0] <*> [1, 0] <*> [1, 0] -- color space visualization
 
+
+cubeRed :: [L.V3 Float]
+cubeRed = L.V3 <$> [1, 1] <*> [0, 0] <*> [0, 0] -- color space visualization
+
 -- Vertices for each triangle in CCW order
 cubeIndices :: [L.V3 GL.GLuint]
 cubeIndices = [ L.V3 2 1 0 -- right
@@ -266,7 +324,7 @@ cubeIndices = [ L.V3 2 1 0 -- right
            ]
 
 cubeMesh :: Mesh
-cubeMesh = Mesh cubeVertices cubeIndices cubeColors
+cubeMesh = Mesh cubeVertices cubeIndices cubeRed
 
 --maybe map this to (+)
 --should take multiple meshes eventually, maybe has type [Mesh] -> Mesh, could be a recursion
