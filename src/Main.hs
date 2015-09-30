@@ -4,7 +4,6 @@
   -mouse pointer velocity for camera
   -render text to screen
   -audio
-  -transparency, blending boxes together
   -scene graph
     - scale/rotate/move based on tree structure
     - compress matrix transform
@@ -21,6 +20,14 @@
   -Reseach LambdaCase, MultiWayIf, and PatternSynonyms pragmas
   -See if current deltaTime calculation could be done with SDL Timers instead,
       like in lazyfoo's c++ example
+-}
+
+{-
+I would like to do an Entity Component System soon-ish. So I could have Transform component, Mesh, Renderer, ParticleSystem,
+Collision, Camera etc. All of these need to use data from one another. Can an entity be some sort of partially evaluated function?
+I think it'd be okay if when these entities needed data from other entities they were looking at what happened last frame. An old
+copy of the entity. How do I get a List of all of the Transforms and update them in a collision pass or scenegraph pass without
+having to pass the entire entity?
 -}
 
 --Notes
@@ -57,7 +64,7 @@ import SDL (($=))
 import qualified SDL
 import qualified SDL.Mixer as Mix
 import Graphics.Rendering.OpenGL as GL
-import Graphics.Rendering.OpenGL (($=))
+--import Graphics.Rendering.OpenGL (($=))
 import qualified Graphics.GLUtil as U
 import qualified Graphics.GLUtil.Camera3D as U
 import qualified Linear as L
@@ -67,8 +74,6 @@ import qualified System.Random as R
 
 screenWidth, screenHeight :: CInt
 (screenWidth, screenHeight) = (640, 480)
-
-
 
 screenWidthInt, screenHeightInt :: Int
 (screenWidthInt, screenHeightInt) = (640, 480)
@@ -132,11 +137,7 @@ main = do
 
   let initPlayer = Player (U.dolly (L.V3 0 0 10) U.fpsCamera) (PlayerInputData (L.V2 0 0) (L.V2 0 0))
 
-  gen <- R.getStdGen
-  let (rando, newGen) = R.randomR ((-10), 10) gen
-  do R.setStdGen newGen
-  let longMesh = transformMesh cubeMesh (L.V3 rando 0 0) (L.V3 1 3 1)
-  let masterMesh = concatMesh longMesh cubeMesh
+  masterMesh <- generateScene
 
   Mix.withAudio Mix.defaultAudio 256 $ do
     print =<< Mix.musicDecoders
@@ -179,7 +180,6 @@ loop window player lastFrameTime mesh = do
 
   unless (quit || escapeButtonDown) (loop window updatedPlayer time mesh)
 
-
 updatePlayer :: PlayerInputData -> Player -> CFloat -> CFloat -> Player
 updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) player moveSpeed rotateSpeed =
   Player updatedCam (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) where
@@ -187,15 +187,14 @@ updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) player 
     zMoveDelta =   realToFrac (moveY * moveSpeed)
     xRotateDelta = realToFrac (-rotateX) * rotateSpeed
     yRotateDelta = realToFrac rotateY * rotateSpeed
-    newPos = U.rightward (cam player) * xMoveDelta
-             + U.forward (cam player) * zMoveDelta
+    newPos = (U.rightward (cam player)) * xMoveDelta
+           + (U.forward   (cam player)) * zMoveDelta
     updatedCam = U.dolly newPos .
-                 U.pan xRotateDelta .
+                 U.panGlobal xRotateDelta .
                  U.tilt yRotateDelta $ cam player
 
 
 --how can pattern between smoothedPlayer and v2MoveTowards be represented "the haskell way"
-
 
 --smoothing delta should eventually be per Axis, bundled in some Input struct
 smoothedPlayer :: PlayerInputData -> PlayerInputData -> CFloat -> PlayerInputData
@@ -307,6 +306,9 @@ cubeColors = L.V3 <$> [1, 0] <*> [1, 0] <*> [1, 0] -- color space visualization
 cubeRed :: [L.V3 Float]
 cubeRed = L.V3 <$> [1, 1] <*> [0, 0] <*> [0, 0] -- color space visualization
 
+monochromeColorArray :: L.V3 Float -> [L.V3 Float]
+monochromeColorArray (L.V3 r g b) = L.V3 <$> [r, r] <*> [g, g] <*> [b, b] -- color space visualization
+
 -- Vertices for each triangle in CCW order
 cubeIndices :: [L.V3 GL.GLuint]
 cubeIndices = [ L.V3 2 1 0 -- right
@@ -328,6 +330,7 @@ cubeMesh = Mesh cubeVertices cubeIndices cubeRed
 
 --maybe map this to (+)
 --should take multiple meshes eventually, maybe has type [Mesh] -> Mesh, could be a recursion
+
 concatMesh :: Mesh -> Mesh -> Mesh
 concatMesh meshA meshB =
   Mesh newV newI newC where
@@ -336,7 +339,47 @@ concatMesh meshA meshB =
       where vertCountMeshA = fromIntegral $ length (vertices meshA)
     newC = colors meshA ++ colors meshB
 
-transformMesh :: Mesh -> L.V3 Float -> L.V3 Float -> Mesh
-transformMesh mesh position scale =
-  Mesh newVertices (indices mesh) (colors mesh) where
+transformMesh :: Mesh -> L.V3 Float -> L.V3 Float -> L.V3 Float -> Mesh
+transformMesh mesh position scale color =
+  Mesh newVertices (indices mesh) (monochromeColorArray color) where
     newVertices = map((+ position) . (* scale))(vertices mesh)
+
+generateScene :: IO Mesh
+generateScene = do
+  initBox <- createBox
+  meshes <- createBoxes initBox 10
+  return meshes
+
+createBoxes :: Mesh -> Int -> IO Mesh
+createBoxes ongoingMesh index = do
+    box <- createBox
+    let fullMesh = concatMesh ongoingMesh box
+    if (index > 0)
+    then createBoxes fullMesh (index - 1)
+    else return fullMesh
+
+createBox :: IO Mesh
+createBox =
+  let boxPositionRange = 5
+      colorRangeA = L.V3 1 0 0
+      colorRangeB = L.V3 0 1 0
+  in do
+  cubePosition <- randomUnitVector
+  colorLerpValue <- randomValue
+  let lerpedColor = L.lerp colorLerpValue colorRangeA colorRangeB
+  let mesh = (transformMesh cubeMesh (cubePosition * boxPositionRange) (L.V3 1 1 1) lerpedColor)
+  return mesh
+
+--return vector with random values between -1 and 1
+randomUnitVector :: IO (L.V3 Float)
+randomUnitVector = do
+  gen <- R.newStdGen
+  let randoms = R.randomRs (-1,1) gen :: [Float]
+  return (L.V3 (randoms !! 0) (randoms !! 1) (randoms !! 2))--there should be a nicer way to do this
+
+--random number between 0 and 1
+randomValue :: IO Float
+randomValue = do
+  gen <- R.newStdGen
+  let (result, _) = R.randomR (0, 1) gen
+  return result
