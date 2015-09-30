@@ -92,6 +92,14 @@ data MarshalledInputs = MarshalledInputs { arrowUp :: Integer
                                           , mousePos :: V2 Double
                                           , escape :: Integer  }
 -}
+
+boxCount = 150
+boxRange = 5
+colorRangeA = L.V3 1 1 1
+colorRangeB = L.V3 0 0 0.5
+boxScaleA = L.V3 1 1 1
+boxScaleB = L.V3 0.3 0.3 0.3
+
 data PlayerInputData = PlayerInputData { playerPosition :: V2 CFloat -- x , z
                                        , playerRotation :: V2 CFloat -- pan , tilt
                                        }
@@ -134,17 +142,18 @@ main = do
   SDL.showWindow window
 
   _ <- SDL.glCreateContext window
-
+  --TODO rotate/place initial player to match cover placement
   let initPlayer = Player (U.dolly (L.V3 0 0 10) U.fpsCamera) (PlayerInputData (L.V2 0 0) (L.V2 0 0))
 
   masterMesh <- generateScene
 
   Mix.withAudio Mix.defaultAudio 256 $ do
-    print =<< Mix.musicDecoders
+    --print =<< Mix.musicDecoders
     music <- Mix.load "Riddlydiddly.wav"
-    print $ Mix.musicType music
+    --print $ Mix.musicType music
     Mix.playMusic Mix.Forever music
     loop window initPlayer 0 masterMesh
+    print "test"
     Mix.free music
 
   SDL.destroyWindow window
@@ -168,17 +177,25 @@ loop window player lastFrameTime mesh = do
   let quit = SDL.QuitEvent `elem` events
   keyboardEvents <- SDL.getKeyboardState
   let escapeButtonDown = keyboardEvents SDL.ScancodeEscape
+  let reloadButtonDown = keyboardEvents SDL.ScancodeR
 
   let rawInputs = gatherInputsRaw keyboardEvents
-  let smoothPlayer = smoothedPlayer (lastFrameInput player) rawInputs (deltaTime/2)
+  let smoothPlayer = smoothedPlayer (lastFrameInput player) rawInputs (deltaTime*0.5)
   let updatedPlayer = updatePlayer smoothPlayer player moveSpeed rotateSpeed
 
   resources <- initResources mesh
   draw resources mesh updatedPlayer
 
   SDL.glSwapWindow window
+  newMesh <- shouldUpdateMesh reloadButtonDown mesh
+  unless (quit || escapeButtonDown) (loop window updatedPlayer time newMesh)--lol
 
-  unless (quit || escapeButtonDown) (loop window updatedPlayer time mesh)
+
+shouldUpdateMesh :: Bool -> Mesh -> IO Mesh
+shouldUpdateMesh isDown oldMesh =
+  if isDown == True
+  then do masterMesh <- generateScene; return masterMesh
+  else return oldMesh
 
 updatePlayer :: PlayerInputData -> Player -> CFloat -> CFloat -> Player
 updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) player moveSpeed rotateSpeed =
@@ -187,8 +204,8 @@ updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) player 
     zMoveDelta =   realToFrac (moveY * moveSpeed)
     xRotateDelta = realToFrac (-rotateX) * rotateSpeed
     yRotateDelta = realToFrac rotateY * rotateSpeed
-    newPos = (U.rightward (cam player)) * xMoveDelta
-           + (U.forward   (cam player)) * zMoveDelta
+    newPos = U.rightward (cam player) * xMoveDelta
+           + U.forward   (cam player) * zMoveDelta
     updatedCam = U.dolly newPos .
                  U.panGlobal xRotateDelta .
                  U.tilt yRotateDelta $ cam player
@@ -216,7 +233,7 @@ moveTowards lastValue target maxDelta =
     sign = signum target
     result = lastValue + (maxDelta * sign)
   in
-    if abs(result) > abs(target)
+    if abs result > abs target
     then target
     else result
 
@@ -299,13 +316,6 @@ shaderPath = ""--original path was  wikibook" </> "tutorial-05-3D
 cubeVertices :: [L.V3 Float]
 cubeVertices = L.V3 <$> [1, -1] <*> [1, -1] <*> [1, -1]
 
-cubeColors :: [L.V3 Float]
-cubeColors = L.V3 <$> [1, 0] <*> [1, 0] <*> [1, 0] -- color space visualization
-
-
-cubeRed :: [L.V3 Float]
-cubeRed = L.V3 <$> [1, 1] <*> [0, 0] <*> [0, 0] -- color space visualization
-
 monochromeColorArray :: L.V3 Float -> [L.V3 Float]
 monochromeColorArray (L.V3 r g b) = L.V3 <$> [r, r] <*> [g, g] <*> [b, b] -- color space visualization
 
@@ -326,7 +336,7 @@ cubeIndices = [ L.V3 2 1 0 -- right
            ]
 
 cubeMesh :: Mesh
-cubeMesh = Mesh cubeVertices cubeIndices cubeRed
+cubeMesh = Mesh cubeVertices cubeIndices (monochromeColorArray (L.V3 0 0 0))
 
 --maybe map this to (+)
 --should take multiple meshes eventually, maybe has type [Mesh] -> Mesh, could be a recursion
@@ -344,30 +354,29 @@ transformMesh mesh position scale color =
   Mesh newVertices (indices mesh) (monochromeColorArray color) where
     newVertices = map((+ position) . (* scale))(vertices mesh)
 
+
 generateScene :: IO Mesh
 generateScene = do
   initBox <- createBox
-  meshes <- createBoxes initBox 10
+  meshes <- createBoxes initBox boxCount
   return meshes
 
 createBoxes :: Mesh -> Int -> IO Mesh
 createBoxes ongoingMesh index = do
     box <- createBox
     let fullMesh = concatMesh ongoingMesh box
-    if (index > 0)
+    if index > 0
     then createBoxes fullMesh (index - 1)
     else return fullMesh
 
 createBox :: IO Mesh
-createBox =
-  let boxPositionRange = 5
-      colorRangeA = L.V3 1 0 0
-      colorRangeB = L.V3 0 1 0
-  in do
+createBox = do
   cubePosition <- randomUnitVector
   colorLerpValue <- randomValue
+  boxScaleValue <- randomValue
   let lerpedColor = L.lerp colorLerpValue colorRangeA colorRangeB
-  let mesh = (transformMesh cubeMesh (cubePosition * boxPositionRange) (L.V3 1 1 1) lerpedColor)
+  let lerpedScale = L.lerp boxScaleValue boxScaleA boxScaleB
+  let mesh = transformMesh cubeMesh (cubePosition * boxRange) lerpedScale lerpedColor
   return mesh
 
 --return vector with random values between -1 and 1
@@ -376,6 +385,7 @@ randomUnitVector = do
   gen <- R.newStdGen
   let randoms = R.randomRs (-1,1) gen :: [Float]
   return (L.V3 (randoms !! 0) (randoms !! 1) (randoms !! 2))--there should be a nicer way to do this
+  --return (L.V3 (V.fromList randoms))
 
 --random number between 0 and 1
 randomValue :: IO Float
