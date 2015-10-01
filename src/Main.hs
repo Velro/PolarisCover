@@ -1,9 +1,10 @@
 --TODO
 {-
-  -Draw origin coordinates
+  -getKey, getKeyDown, getKeyUp
+  -antialiasing
   -mouse pointer velocity for camera
   -render text to screen
-  -audio
+  -entity component system
   -scene graph
     - scale/rotate/move based on tree structure
     - compress matrix transform
@@ -22,8 +23,14 @@
       like in lazyfoo's c++ example
 -}
 
+--Entity Component System Notes
 {-
-I would like to do an Entity Component System soon-ish. So I could have Transform component, Mesh, Renderer, ParticleSystem,
+-maybe store all components of a certain type in a hashmap,
+ entities store a list of keys to their respective components.
+ This would in theory make things like collision, scene graph, and mesh building
+ more cache friendly over storing the data per entity. AOS vs SOA
+
+So I could have Transform component, Mesh, Renderer, ParticleSystem,
 Collision, Camera etc. All of these need to use data from one another. Can an entity be some sort of partially evaluated function?
 I think it'd be okay if when these entities needed data from other entities they were looking at what happened last frame. An old
 copy of the entity. How do I get a List of all of the Transforms and update them in a collision pass or scenegraph pass without
@@ -73,10 +80,10 @@ import Data.Fixed
 import qualified System.Random as R
 
 screenWidth, screenHeight :: CInt
-(screenWidth, screenHeight) = (640, 480)
+(screenWidth, screenHeight) = (1280, 600)
 
 screenWidthInt, screenHeightInt :: Int
-(screenWidthInt, screenHeightInt) = (640, 480)
+(screenWidthInt, screenHeightInt) = (1280, 600)
 
 {- Not necessary until more complex input
 --this seems like a good fit for FRP
@@ -143,7 +150,9 @@ main = do
 
   _ <- SDL.glCreateContext window
   --TODO rotate/place initial player to match cover placement
-  let initPlayer = Player (U.dolly (L.V3 0 0 10) U.fpsCamera) (PlayerInputData (L.V2 0 0) (L.V2 0 0))
+  let cam = U.dolly (L.V3 15 20 15) $ U.fpsCamera
+  let camTwo = U.panGlobal (45) . U.tilt (-45) $ cam
+  let initPlayer = Player (camTwo ) (PlayerInputData (L.V2 0 0) (L.V2 0 0))
 
   masterMesh <- generateScene
 
@@ -153,7 +162,6 @@ main = do
     --print $ Mix.musicType music
     Mix.playMusic Mix.Forever music
     loop window initPlayer 0 masterMesh
-    print "test"
     Mix.free music
 
   SDL.destroyWindow window
@@ -275,6 +283,7 @@ initResources newMesh = do
 draw :: Resources -> Mesh -> Player -> IO ()
 draw r mesh player = do
     GL.clearColor $= GL.Color4 1 1 1 1
+    GL.multisample $= GL.Enabled
     --GL.depthFunc $= Just GL.Less
     GL.clear [GL.ColorBuffer, GL.DepthBuffer]
     -- In C++ example GLUT handles resizing the viewport?
