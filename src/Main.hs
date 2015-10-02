@@ -1,8 +1,9 @@
 --TODO
 {-
   -getKey, getKeyDown, getKeyUp
+      --seems to be dependent on previous state, perhaps this and deltaTime calc can be added to a single Engine.Update call kinda thing?
   -antialiasing
-  -mouse pointer velocity for camera
+  -clamp vertical rotation. Currently I can rotate a full 360 vertically
   -render text to screen
   -entity component system
   -scene graph
@@ -37,10 +38,6 @@ copy of the entity. How do I get a List of all of the Transforms and update them
 having to pass the entire entity?
 -}
 
---Notes
-{-
-  -mouseX/mouseY = SDL.getMouseLocation
--}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
@@ -80,10 +77,10 @@ import Data.Fixed
 import qualified System.Random as R
 
 screenWidth, screenHeight :: CInt
-(screenWidth, screenHeight) = (1280, 600)
+(screenWidth, screenHeight) = (128, 80)
 
 screenWidthInt, screenHeightInt :: Int
-(screenWidthInt, screenHeightInt) = (1280, 600)
+(screenWidthInt, screenHeightInt) = (128, 80)
 
 {- Not necessary until more complex input
 --this seems like a good fit for FRP
@@ -107,12 +104,20 @@ colorRangeB = L.V3 0 0 0.5
 boxScaleA = L.V3 1 1 1
 boxScaleB = L.V3 0.3 0.3 0.3
 
+maxMouseInput = 50
+
+useMouse :: Bool
+useMouse = True
+
 data PlayerInputData = PlayerInputData { playerPosition :: V2 CFloat -- x , z
                                        , playerRotation :: V2 CFloat -- pan , tilt
                                        }
 
 data Player = Player { cam :: U.Camera CFloat --should be Transform composed with a Camera
                       , lastFrameInput :: PlayerInputData
+                      , position :: L.V3 CFloat
+                      , panRotation :: CFloat
+                      , tiltRotation :: CFloat
                      }
 
 
@@ -149,21 +154,22 @@ main = do
   SDL.showWindow window
 
   _ <- SDL.glCreateContext window
-  --TODO rotate/place initial player to match cover placement
+
+  SDL.setRelativeMouseMode True
+
+
   let cam = U.dolly (L.V3 15 20 15) $ U.fpsCamera
   let camTwo = U.panGlobal (45) . U.tilt (-45) $ cam
-  let initPlayer = Player (camTwo ) (PlayerInputData (L.V2 0 0) (L.V2 0 0))
+  let initPlayer = Player (camTwo ) (PlayerInputData (L.V2 0 0) (L.V2 0 0)) (L.V3 15 20 15) 45 (-45)
 
   masterMesh <- generateScene
-
   Mix.withAudio Mix.defaultAudio 256 $ do
-    --print =<< Mix.musicDecoders
     music <- Mix.load "Riddlydiddly.wav"
-    --print $ Mix.musicType music
     Mix.playMusic Mix.Forever music
     loop window initPlayer 0 masterMesh
     Mix.free music
 
+  SDL.setRelativeMouseMode False
   SDL.destroyWindow window
   SDL.quit
 
@@ -173,7 +179,7 @@ loop window player lastFrameTime mesh = do
   time <- SDL.time--maybe we can find this with SDL timers?
   let deltaTime = (time - lastFrameTime) `mod'` 1 --mod by 1 because the second or third frame comes up with a deltaTime in the thousands...
   let moveSpeed = deltaTime * 10
-  let rotateSpeed = deltaTime * 100
+  let rotateSpeed = deltaTime * 20
 
   let collectEvents = do
         e <- SDL.pollEvent
@@ -183,20 +189,24 @@ loop window player lastFrameTime mesh = do
 
   events <- map SDL.eventPayload <$> collectEvents
   let quit = SDL.QuitEvent `elem` events
+
+  mouseCoord <- SDL.getRelativeMouseLocation
   keyboardEvents <- SDL.getKeyboardState
   let escapeButtonDown = keyboardEvents SDL.ScancodeEscape
   let reloadButtonDown = keyboardEvents SDL.ScancodeR
 
   let rawInputs = gatherInputsRaw keyboardEvents
   let smoothPlayer = smoothedPlayer (lastFrameInput player) rawInputs (deltaTime*0.5)
-  let updatedPlayer = updatePlayer smoothPlayer player moveSpeed rotateSpeed
+  let updatedPlayer = updatePlayer smoothPlayer mouseCoord player moveSpeed rotateSpeed
 
   resources <- initResources mesh
   draw resources mesh updatedPlayer
 
+  print (U.upward (cam updatedPlayer))
+
   SDL.glSwapWindow window
   newMesh <- shouldUpdateMesh reloadButtonDown mesh
-  unless (quit || escapeButtonDown) (loop window updatedPlayer time newMesh)--lol
+  unless (quit || escapeButtonDown) (loop window updatedPlayer time newMesh)
 
 
 shouldUpdateMesh :: Bool -> Mesh -> IO Mesh
@@ -205,18 +215,23 @@ shouldUpdateMesh isDown oldMesh =
   then do masterMesh <- generateScene; return masterMesh
   else return oldMesh
 
-updatePlayer :: PlayerInputData -> Player -> CFloat -> CFloat -> Player
-updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) player moveSpeed rotateSpeed =
-  Player updatedCam (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) where
+updatePlayer :: PlayerInputData -> Point L.V2 CInt -> Player -> CFloat -> CFloat -> Player
+updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) (P (L.V2 mouseRelX mouseRelY))
+              (Player oldCamera derp oldPosition oldPan oldTilt) moveSpeed rotateSpeed =
+  Player updatedCam (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) newPos 0 0 where
     xMoveDelta =   realToFrac (moveX * moveSpeed)
     zMoveDelta =   realToFrac (moveY * moveSpeed)
-    xRotateDelta = realToFrac (-rotateX) * rotateSpeed
-    yRotateDelta = realToFrac rotateY * rotateSpeed
-    newPos = U.rightward (cam player) * xMoveDelta
-           + U.forward   (cam player) * zMoveDelta
+    xRotateDelta = if useMouse
+                   then fromIntegral (-mouseRelX) * rotateSpeed
+                   else realToFrac (-rotateX) * rotateSpeed
+    yRotateDelta = if useMouse
+                   then fromIntegral (-mouseRelY) * rotateSpeed
+                   else realToFrac rotateY * rotateSpeed
+    newPos = U.rightward (oldCamera) * xMoveDelta
+           + U.forward   (oldCamera) * zMoveDelta
     updatedCam = U.dolly newPos .
                  U.panGlobal xRotateDelta .
-                 U.tilt yRotateDelta $ cam player
+                 U.tilt yRotateDelta $ oldCamera
 
 
 --how can pattern between smoothedPlayer and v2MoveTowards be represented "the haskell way"
@@ -249,20 +264,20 @@ moveTowards lastValue target maxDelta =
 gatherInputsRaw :: (SDL.Scancode -> Bool) -> PlayerInputData
 gatherInputsRaw events =
   PlayerInputData (V2 updatedMoveX updatedMoveZ) (V2 updatedRotateX updatedRotateY) where
+  --positional
   updatedMoveX = if | events SDL.ScancodeA -> -1
                     | events SDL.ScancodeD -> 1
                     | otherwise -> 0
   updatedMoveZ = if | events SDL.ScancodeW -> 1
                     | events SDL.ScancodeS -> -1
                     | otherwise -> 0
+  --rotational
   updatedRotateX = if | events SDL.ScancodeLeft -> -1
-                      | events SDL.ScancodeRight ->1
-                      | otherwise -> 0
+                           | events SDL.ScancodeRight ->1
+                           | otherwise -> 0
   updatedRotateY = if | events SDL.ScancodeUp -> 1
-                      | events SDL.ScancodeDown -> -1
-                      | otherwise -> 0
-
-
+                           | events SDL.ScancodeDown -> -1
+                           | otherwise -> 0
 
 initResources :: Mesh -> IO Resources
 initResources newMesh = do
@@ -402,3 +417,10 @@ randomValue = do
   gen <- R.newStdGen
   let (result, _) = R.randomR (0, 1) gen
   return result
+
+--inverseLerp ::
+
+
+--
+--mapRange :: Num -> Num -> Num -> Num -> Num -> Num
+--mapRange rangeA rangeB rangeX rangeY value =
