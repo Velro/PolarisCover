@@ -1,0 +1,28 @@
+Name:            TestPackage
+Version:         0.0
+Cabal-Version:   >= 1.2
+License:         BSD3
+Author:          Angela Author
+Synopsis:        Package with library and two programs
+Build-Type:      Simple
+
+Library
+  Build-Depends:
+    spatial-math,
+    random,
+    sdl2 >= 2.0.1,
+    sdl2-mixer >= 0.1,
+    base,
+    linear,
+    GLUtil,
+    OpenGL,
+    filepath,
+    vector,
+    bytestring
+  Exposed-Modules: Main, YamMath
+  hs-source-dirs: src
+
+Executable program1
+  Main-Is:         Main.hs
+  Hs-Source-Dirs:  src
+  Other-Modules:   Main, YamMath

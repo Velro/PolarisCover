@@ -3,14 +3,16 @@
   -getKey, getKeyDown, getKeyUp
       --seems to be dependent on previous state, perhaps this and deltaTime calc can be added to a single Engine.Update call kinda thing?
   -antialiasing
-  -clamp vertical rotation. Currently I can rotate a full 360 vertically
   -render text to screen
   -entity component system
+    - maybe do "functional reactive" instead?
+    - HMH approach with Flags per entity and do work as needed? He probably revamps this later in stream
   -scene graph
     - scale/rotate/move based on tree structure
     - compress matrix transform
     - recurse through tree from bottom to top?
     - transform, rotate, scale matrix transformation
+  -collision
   -reinstall packages with profiling support https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/profiling.html
 -}
 
@@ -30,6 +32,7 @@
  entities store a list of keys to their respective components.
  This would in theory make things like collision, scene graph, and mesh building
  more cache friendly over storing the data per entity. AOS vs SOA
+
 
 So I could have Transform component, Mesh, Renderer, ParticleSystem,
 Collision, Camera etc. All of these need to use data from one another. Can an entity be some sort of partially evaluated function?
@@ -55,7 +58,6 @@ import Data.List as List
 import Control.Monad
 import Data.Foldable (for_)
 import Foreign.C.Types
-import Linear
 import Linear.Affine
 import qualified Data.ByteString as BS
 import qualified Data.Vector.Storable as V
@@ -76,13 +78,16 @@ import Data.Fixed
 
 import qualified System.Random as R
 
-import SpatialMath
+import SpatialMath --for quaternion to euler
+import YamMath
+
 
 screenWidth, screenHeight :: CInt
 (screenWidth, screenHeight) = (128 * 3, 80 * 3)
 
 screenWidthInt, screenHeightInt :: Int
 (screenWidthInt, screenHeightInt) = (128 * 3, 80 * 3)
+
 
 {- Not necessary until more complex input
 --this seems like a good fit for FRP
@@ -97,6 +102,12 @@ data MarshalledInputs = MarshalledInputs { arrowUp :: Integer
                                           , arrowRight :: Integer
                                           , mousePos :: V2 Double
                                           , escape :: Integer  }
+
+
+data Transform = Transform {t_position :: V3 CFloat
+                         ,t_rotation :: Quaternion CFloat --should this be a higher precision?
+                         ,t_scale :: V3 CFloat
+                         }
 -}
 
 boxCount = 150
@@ -112,15 +123,12 @@ maxRoll = 80 --must be less than 90
 useMouse :: Bool
 useMouse = True
 
-data PlayerInputData = PlayerInputData { playerPosition :: V2 CFloat -- x , z
-                                       , playerRotation :: V2 CFloat -- pan , tilt
+data PlayerInputData = PlayerInputData { playerPosition :: L.V2 CFloat -- x , z
+                                       , playerRotation :: L.V2 CFloat -- pan , tilt
                                        }
 
 data Player = Player { cam :: U.Camera CFloat --should be Transform composed with a Camera
                       , lastFrameInput :: PlayerInputData
-                      , playerCameraPosition :: L.V3 CFloat
-                      , panRotation :: CFloat
-                      , tiltRotation :: CFloat
                      }
 
 
@@ -136,11 +144,6 @@ data Mesh = Mesh {vertices :: [L.V3 Float]
                  ,colors :: [L.V3 Float]
                  }
 
-data Transform = Transform {t_position :: V3 CFloat
-                           ,t_rotation :: Quaternion CFloat --should this be a higher precision?
-                           ,t_scale :: V3 CFloat
-                           }
-
 main :: IO ()
 main = do
   SDL.initialize [SDL.InitVideo, SDL.InitAudio]
@@ -152,7 +155,7 @@ main = do
   window <-
     SDL.createWindow
       "Polaris Cover"
-      SDL.defaultWindow {SDL.windowInitialSize = V2 screenWidth screenHeight,
+      SDL.defaultWindow {SDL.windowInitialSize = L.V2 screenWidth screenHeight,
                          SDL.windowOpenGL = Just SDL.defaultOpenGL}
   SDL.showWindow window
 
@@ -163,7 +166,7 @@ main = do
 
   let cam = U.dolly (L.V3 15 20 15) $ U.fpsCamera
   let camTwo = U.panGlobal (45) . U.tilt (-45) $ cam
-  let initPlayer = Player (camTwo ) (PlayerInputData (L.V2 0 0) (L.V2 0 0)) (L.V3 0 0 0) 45 (-45)
+  let initPlayer = Player (camTwo ) (PlayerInputData (L.V2 0 0) (L.V2 0 0))
 
   masterMesh <- generateScene
   Mix.withAudio Mix.defaultAudio 256 $ do
@@ -206,12 +209,6 @@ loop window player lastFrameTime mesh = do
   resources <- initResources mesh
   draw resources mesh updatedPlayer
 
-  --print (eRoll (euler321OfQuat (U.orientation (cam updatedPlayer))) * 57.2957795131)
-  let roll = abs (eRoll (euler321OfQuat (U.orientation (cam updatedPlayer))) * 57.2957795131)
-  if (roll > 80 && roll < 100)
-  then print ("roll")
-  else print roll
-
   SDL.glSwapWindow window
   newMesh <- shouldUpdateMesh reloadButtonDown mesh
   unless (quit || escapeButtonDown) (loop window updatedPlayer time newMesh)
@@ -225,8 +222,8 @@ shouldUpdateMesh isDown oldMesh =
 
 updatePlayer :: PlayerInputData -> Point L.V2 CInt -> Player -> CFloat -> CFloat -> Player
 updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) (P (L.V2 mouseRelX mouseRelY))
-              (Player oldCamera unusedB oldPos oldPan oldTilt) moveSpeed rotateSpeed =
-  Player updatedCam (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) newPos newPan newTilt where
+              (Player oldCamera unusedB) moveSpeed rotateSpeed =
+  Player updatedCam (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) where
     (L.V2 clampedMouseRelX clampedMouseRelY) = v2ClampMagnitude (L.V2 (fromIntegral mouseRelX) (fromIntegral mouseRelY)) maxCamRotationDelta
     xMoveDelta =   realToFrac (moveX * moveSpeed)
     zMoveDelta =   realToFrac (moveY * moveSpeed)
@@ -249,10 +246,10 @@ updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) (P (L.V
 
 clampCamera :: U.Camera CFloat -> Bool
 clampCamera camera =
-  if (roll > maxRoll && roll < (180 - maxRoll))
+  if roll > maxRoll && roll < (180 - maxRoll)
   then False
   else True
-  where roll = abs (eRoll (euler321OfQuat (U.orientation (camera))) * 57.2957795131)
+  where roll = abs (eRoll (euler321OfQuat (U.orientation camera)) * 57.2957795131)
 
 --how can pattern between smoothedPlayer and v2MoveTowards be represented "the haskell way"
 
@@ -265,7 +262,7 @@ smoothedPlayer (PlayerInputData oldMove oldRotate) (PlayerInputData rawMove rawR
 
 --zip (toList (L.V3 1 2 3)) (toList (L.V3 4 5 6)) to create [(1,7),(2,8),(3,9)]
 v2MoveTowards :: (Num a, Ord a) => L.V2 a -> L.V2 a -> a -> L.V2 a
-v2MoveTowards (V2 lastValueX lastValueY) (V2 targetValueX targetValueY) maxDelta =
+v2MoveTowards (L.V2 lastValueX lastValueY) (L.V2 targetValueX targetValueY) maxDelta =
   L.V2 resultX resultY where
     resultX = moveTowards lastValueX targetValueX maxDelta
     resultY = moveTowards lastValueY targetValueY maxDelta
@@ -283,7 +280,7 @@ moveTowards lastValue target maxDelta =
 --smooth inputs vs raw inputs, probably need to wrap this function to do that
 gatherInputsRaw :: (SDL.Scancode -> Bool) -> PlayerInputData
 gatherInputsRaw events =
-  PlayerInputData (V2 updatedMoveX updatedMoveZ) (V2 updatedRotateX updatedRotateY) where
+  PlayerInputData (L.V2 updatedMoveX updatedMoveZ) (L.V2 updatedRotateX updatedRotateY) where
   --positional
   updatedMoveX = if | events SDL.ScancodeA -> -1
                     | events SDL.ScancodeD -> 1
@@ -410,8 +407,8 @@ createBoxes ongoingMesh index = do
     box <- createBox
     let fullMesh = concatMesh ongoingMesh box
     if index > 0
-    then createBoxes fullMesh (index - 1)
-    else return fullMesh
+        then createBoxes fullMesh (index - 1)
+        else return fullMesh
 
 createBox :: IO Mesh
 createBox = do
@@ -444,19 +441,3 @@ randomValue = do
 --v2ComponentClamp :: (Num a, Ord a) => V2 a -> a -> V2 a
 --v2ComponentClamp = (V2 inX inY) mx = V2 resultX resultY where
 --  resultX = clampValue
-
-
-v2ClampMagnitude ::(Num a, Ord a, Fractional a, Floating a) => L.V2 a -> a -> L.V2 a
-v2ClampMagnitude input mx =
-  if vectorLength > mx
-  then input * (L.V2 compon compon)
-  else input
-  where
-    vectorLength = v2InnerProduct input input
-    compon = (mx / sqrt vectorLength)
-
-clampValue :: (Ord a) => a -> a -> a -> a
-clampValue mn mx = max mn . min mx
-
-v2InnerProduct :: (Num a) => L.V2 a -> L.V2 a -> a
-v2InnerProduct (V2 aX aY) (V2 bX bY) = aX * bX + aY * bY
