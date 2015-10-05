@@ -76,11 +76,13 @@ import Data.Fixed
 
 import qualified System.Random as R
 
+import SpatialMath
+
 screenWidth, screenHeight :: CInt
-(screenWidth, screenHeight) = (128, 80)
+(screenWidth, screenHeight) = (128 * 3, 80 * 3)
 
 screenWidthInt, screenHeightInt :: Int
-(screenWidthInt, screenHeightInt) = (128, 80)
+(screenWidthInt, screenHeightInt) = (128 * 3, 80 * 3)
 
 {- Not necessary until more complex input
 --this seems like a good fit for FRP
@@ -104,7 +106,8 @@ colorRangeB = L.V3 0 0 0.5
 boxScaleA = L.V3 1 1 1
 boxScaleB = L.V3 0.3 0.3 0.3
 
-maxMouseInput = 50
+maxCamRotationDelta = 15
+maxRoll = 80 --must be less than 90
 
 useMouse :: Bool
 useMouse = True
@@ -115,7 +118,7 @@ data PlayerInputData = PlayerInputData { playerPosition :: V2 CFloat -- x , z
 
 data Player = Player { cam :: U.Camera CFloat --should be Transform composed with a Camera
                       , lastFrameInput :: PlayerInputData
-                      , position :: L.V3 CFloat
+                      , playerCameraPosition :: L.V3 CFloat
                       , panRotation :: CFloat
                       , tiltRotation :: CFloat
                      }
@@ -160,7 +163,7 @@ main = do
 
   let cam = U.dolly (L.V3 15 20 15) $ U.fpsCamera
   let camTwo = U.panGlobal (45) . U.tilt (-45) $ cam
-  let initPlayer = Player (camTwo ) (PlayerInputData (L.V2 0 0) (L.V2 0 0)) (L.V3 15 20 15) 45 (-45)
+  let initPlayer = Player (camTwo ) (PlayerInputData (L.V2 0 0) (L.V2 0 0)) (L.V3 0 0 0) 45 (-45)
 
   masterMesh <- generateScene
   Mix.withAudio Mix.defaultAudio 256 $ do
@@ -191,6 +194,7 @@ loop window player lastFrameTime mesh = do
   let quit = SDL.QuitEvent `elem` events
 
   mouseCoord <- SDL.getRelativeMouseLocation
+
   keyboardEvents <- SDL.getKeyboardState
   let escapeButtonDown = keyboardEvents SDL.ScancodeEscape
   let reloadButtonDown = keyboardEvents SDL.ScancodeR
@@ -202,7 +206,11 @@ loop window player lastFrameTime mesh = do
   resources <- initResources mesh
   draw resources mesh updatedPlayer
 
-  print (U.upward (cam updatedPlayer))
+  --print (eRoll (euler321OfQuat (U.orientation (cam updatedPlayer))) * 57.2957795131)
+  let roll = abs (eRoll (euler321OfQuat (U.orientation (cam updatedPlayer))) * 57.2957795131)
+  if (roll > 80 && roll < 100)
+  then print ("roll")
+  else print roll
 
   SDL.glSwapWindow window
   newMesh <- shouldUpdateMesh reloadButtonDown mesh
@@ -217,22 +225,34 @@ shouldUpdateMesh isDown oldMesh =
 
 updatePlayer :: PlayerInputData -> Point L.V2 CInt -> Player -> CFloat -> CFloat -> Player
 updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) (P (L.V2 mouseRelX mouseRelY))
-              (Player oldCamera derp oldPosition oldPan oldTilt) moveSpeed rotateSpeed =
-  Player updatedCam (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) newPos 0 0 where
+              (Player oldCamera unusedB oldPos oldPan oldTilt) moveSpeed rotateSpeed =
+  Player updatedCam (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) newPos newPan newTilt where
+    (L.V2 clampedMouseRelX clampedMouseRelY) = v2ClampMagnitude (L.V2 (fromIntegral mouseRelX) (fromIntegral mouseRelY)) maxCamRotationDelta
     xMoveDelta =   realToFrac (moveX * moveSpeed)
     zMoveDelta =   realToFrac (moveY * moveSpeed)
-    xRotateDelta = if useMouse
-                   then fromIntegral (-mouseRelX) * rotateSpeed
+    newPan = if useMouse
+                   then ((-clampedMouseRelX) * rotateSpeed)
                    else realToFrac (-rotateX) * rotateSpeed
-    yRotateDelta = if useMouse
-                   then fromIntegral (-mouseRelY) * rotateSpeed
+    newTilt = if useMouse
+                   then ((-clampedMouseRelY) * rotateSpeed)
                    else realToFrac rotateY * rotateSpeed
     newPos = U.rightward (oldCamera) * xMoveDelta
            + U.forward   (oldCamera) * zMoveDelta
-    updatedCam = U.dolly newPos .
-                 U.panGlobal xRotateDelta .
-                 U.tilt yRotateDelta $ oldCamera
+           --(U.location oldCamera)
+    --movedCam =
+    updatedCam = if clampCamera tiltedCamera
+                 then tiltedCamera
+                 else nonTiltedCamera
+                 where tiltedCamera = U.dolly newPos . U.panGlobal newPan . U.tilt newTilt $ oldCamera
+                       nonTiltedCamera = U.dolly newPos . U.panGlobal newPan $ oldCamera
 
+
+clampCamera :: U.Camera CFloat -> Bool
+clampCamera camera =
+  if (roll > maxRoll && roll < (180 - maxRoll))
+  then False
+  else True
+  where roll = abs (eRoll (euler321OfQuat (U.orientation (camera))) * 57.2957795131)
 
 --how can pattern between smoothedPlayer and v2MoveTowards be represented "the haskell way"
 
@@ -418,9 +438,25 @@ randomValue = do
   let (result, _) = R.randomR (0, 1) gen
   return result
 
---inverseLerp ::
-
-
---
 --mapRange :: Num -> Num -> Num -> Num -> Num -> Num
 --mapRange rangeA rangeB rangeX rangeY value =
+
+--v2ComponentClamp :: (Num a, Ord a) => V2 a -> a -> V2 a
+--v2ComponentClamp = (V2 inX inY) mx = V2 resultX resultY where
+--  resultX = clampValue
+
+
+v2ClampMagnitude ::(Num a, Ord a, Fractional a, Floating a) => L.V2 a -> a -> L.V2 a
+v2ClampMagnitude input mx =
+  if vectorLength > mx
+  then input * (L.V2 compon compon)
+  else input
+  where
+    vectorLength = v2InnerProduct input input
+    compon = (mx / sqrt vectorLength)
+
+clampValue :: (Ord a) => a -> a -> a -> a
+clampValue mn mx = max mn . min mx
+
+v2InnerProduct :: (Num a) => L.V2 a -> L.V2 a -> a
+v2InnerProduct (V2 aX aY) (V2 bX bY) = aX * bX + aY * bY
