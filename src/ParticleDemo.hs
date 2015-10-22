@@ -40,39 +40,10 @@ import YamMath
 
 
 screenWidth, screenHeight :: CInt
-(screenWidth, screenHeight) = (128 * 3, 80 * 3)
+(screenWidth, screenHeight) = (128 * 6, 80 * 6)
 
 screenWidthInt, screenHeightInt :: Int
-(screenWidthInt, screenHeightInt) = (128 * 3, 80 * 3)
-
-
-{- Not necessary until more complex input
---this seems like a good fit for FRP
---TODO switch to some sort of Enum
--- | 2  = isDown
--- | 1  = OnDown
--- | 0  = isUp
--- | -1 = onUp
-data MarshalledInputs = MarshalledInputs { arrowUp :: Integer
-                                          , arrowDown :: Integer
-                                          , arrowLeft :: Integer
-                                          , arrowRight :: Integer
-                                          , mousePos :: V2 Double
-                                          , escape :: Integer  }
-
-
-data Transform = Transform {t_position :: V3 CFloat
-                         ,t_rotation :: Quaternion CFloat --should this be a higher precision?
-                         ,t_scale :: V3 CFloat
-                         }
--}
-
-boxCount = 150
-boxRange = 5
-colorRangeA = L.V3 1 1 1
-colorRangeB = L.V3 0 0 0.5
-boxScaleA = L.V3 1 1 1
-boxScaleB = L.V3 0.3 0.3 0.3
+(screenWidthInt, screenHeightInt) = (128 * 6, 80 * 6)
 
 maxCamRotationDelta = 15
 maxRoll = 80 --must be less than 90
@@ -111,7 +82,7 @@ main = do
 
   window <-
     SDL.createWindow
-      "Polaris Cover"
+      "Particle Demo"
       SDL.defaultWindow {SDL.windowInitialSize = L.V2 screenWidth screenHeight,
                          SDL.windowOpenGL = Just SDL.defaultOpenGL}
   SDL.showWindow window
@@ -124,11 +95,12 @@ main = do
   let camTwo = U.panGlobal (45) . U.tilt (-45) $ cam
   let initPlayer = Player (camTwo ) (PlayerInputData (L.V2 0 0) (L.V2 0 0))
 
-  masterMesh <- generateScene
+  gen <- R.getStdGen
+  let startParticleSystem = createParticleSystem gen
   Mix.withAudio Mix.defaultAudio 256 $ do
     --music <- Mix.load "Riddlydiddly.wav"
     --Mix.playMusic Mix.Forever music
-    loop window initPlayer 0 masterMesh
+    loop window initPlayer 0 startParticleSystem
     --Mix.free music
 
   --SDL.setRelativeMouseMode False
@@ -136,8 +108,8 @@ main = do
   SDL.quit
 
 --eventually just deltaTime, inputStruct, and entity list?
-loop :: SDL.Window -> Player -> CFloat -> Mesh -> IO ()
-loop window player lastFrameTime mesh = do
+loop :: SDL.Window -> Player -> CFloat -> ParticleSystem -> IO ()
+loop window player lastFrameTime particleSystem = do
   time <- SDL.time--maybe we can find this with SDL timers?
   let deltaTime = (time - lastFrameTime) `mod'` 1 --mod by 1 because the second or third frame comes up with a deltaTime in the thousands...
   let moveSpeed = deltaTime * 10
@@ -162,19 +134,19 @@ loop window player lastFrameTime mesh = do
   let smoothPlayer = smoothedPlayer (lastFrameInput player) rawInputs (deltaTime*0.5)
   let updatedPlayer = updatePlayer smoothPlayer mouseCoord player moveSpeed rotateSpeed
 
-  resources <- initResources mesh
-  draw resources mesh updatedPlayer
+  let mesh = genParticleMesh (particles particleSystem)
+  resources <- initResources
+  draw resources updatedPlayer
 
   SDL.glSwapWindow window
-  newMesh <- shouldUpdateMesh reloadButtonDown mesh
-  unless (quit || escapeButtonDown) (loop window updatedPlayer time newMesh)
+  let newParticleSystem = updateParticleSystem particleSystem
+
+  let debugParticles = particles particleSystem
+  let firstParticle = debugParticles !! 0
+  --print (particlePosition firstParticle)
+  unless (quit || escapeButtonDown) (loop window updatedPlayer time newParticleSystem)
 
 
-shouldUpdateMesh :: Bool -> Mesh -> IO Mesh
-shouldUpdateMesh isDown oldMesh =
-  if isDown == True
-  then do masterMesh <- generateScene; return masterMesh
-  else return oldMesh
 
 updatePlayer :: PlayerInputData -> Point L.V2 CInt -> Player -> CFloat -> CFloat -> Player
 updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) (P (L.V2 mouseRelX mouseRelY))
@@ -199,13 +171,12 @@ updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) (P (L.V
                  where tiltedCamera = U.dolly newPos . U.panGlobal newPan . U.tilt newTilt $ oldCamera
                        nonTiltedCamera = U.dolly newPos . U.panGlobal newPan $ oldCamera
 
-
 clampCamera :: U.Camera CFloat -> Bool
 clampCamera camera =
   if roll > maxRoll && roll < (180 - maxRoll)
   then False
   else True
-  where roll = abs (eRoll (euler321OfQuat (U.orientation camera)) * 57.2957795131)--radian to degree constant
+  where roll = abs (eRoll (euler321OfQuat (U.orientation camera)) * 57.2957795131)
 
 --how can pattern between smoothedPlayer and v2MoveTowards be represented "the haskell way"
 
@@ -216,9 +187,6 @@ smoothedPlayer (PlayerInputData oldMove oldRotate) (PlayerInputData rawMove rawR
     resultMove = v2MoveTowards oldMove rawMove maxDelta
     resultRotate = v2MoveTowards oldRotate rawRotate maxDelta
 
---zip (toList (L.V3 1 2 3)) (toList (L.V3 4 5 6)) to create [(1,7),(2,8),(3,9)]
-
---smooth inputs vs raw inputs, probably need to wrap this function to do that
 gatherInputsRaw :: (SDL.Scancode -> Bool) -> PlayerInputData
 gatherInputsRaw events =
   PlayerInputData (L.V2 updatedMoveX updatedMoveZ) (L.V2 updatedRotateX updatedRotateY) where
@@ -237,137 +205,129 @@ gatherInputsRaw events =
                            | events SDL.ScancodeDown -> -1
                            | otherwise -> 0
 
-initResources :: Mesh -> IO Resources
-initResources newMesh = do
+
+initResources :: IO MyProgram
+initResources = do
     GL.blend $= GL.Enabled
     GL.blendFunc $= (GL.SrcAlpha, GL.OneMinusSrcAlpha)
-    let v = shaderPath </> "cube.v.glsl"
-        f = shaderPath </> "cube.f.glsl"
-    Resources <$> U.simpleShaderProgram v f
-              <*> U.fromSource GL.ArrayBuffer (vertices newMesh)
-              <*> U.fromSource GL.ArrayBuffer (colors newMesh)
-              <*> U.fromSource GL.ElementArrayBuffer (indices newMesh)
+    MyProgram <$> U.loadShaderProgram [(GL.VertexShader, "particles.v.glsl"),
+                                        (GL.GeometryShader, "particles.g.glsl"),
+                                        (GL.FragmentShader, "particles.f.glsl")]
+              <*> U.fromSource GL.ArrayBuffer testVertices
 
-
-draw :: Resources -> Mesh -> Player -> IO ()
-draw r mesh player = do
+--gl setup from http://www.geeks3d.com/20140815/particle-billboarding-with-the-geometry-shader-glsl/
+draw :: MyProgram -> Player -> IO ()
+draw r player = do
     GL.clearColor $= GL.Color4 1 1 1 1
-    GL.multisample $= GL.Enabled
-    --GL.depthFunc $= Just GL.Less
     GL.clear [GL.ColorBuffer, GL.DepthBuffer]
     GL.viewport $= (GL.Position 0 0, GL.Size (fromIntegral screenWidth) (fromIntegral screenHeight))
-    GL.currentProgram $= (Just . U.program . shaderProgram $ r)
-    --coord3d
-    U.enableAttrib (shaderProgram r) "coord3d"
-    GL.bindBuffer GL.ArrayBuffer $= Just (vertBuffer r)
-    U.setAttrib (shaderProgram r) "coord3d"
+    GL.currentProgram $= (Just . U.program . myProgram $ r)
+    U.enableAttrib (myProgram r) "coord3d"
+    GL.bindBuffer GL.ArrayBuffer $= Just (myArray r)
+    U.setAttrib (myProgram r) "coord3d"
         GL.ToFloat $ GL.VertexArrayDescriptor 3 GL.Float 0 U.offset0
-    --color
-    U.enableAttrib (shaderProgram r) "v_color"
-    GL.bindBuffer GL.ArrayBuffer $= Just (colorBuffer r)
-    U.setAttrib (shaderProgram r) "v_color"
-        GL.ToFloat $ GL.VertexArrayDescriptor 3 GL.Float 0 U.offset0
-    --mvp
-    U.asUniform (transformM screenWidthInt screenHeightInt player) $ U.getUniform (shaderProgram r) "mvp"
-    --element
-    GL.bindBuffer GL.ElementArrayBuffer $= Just (elementBuffer r)
-    U.drawIndexedTris (fromIntegral $ length (indices mesh))
-    GL.vertexAttribArray (U.getAttrib (shaderProgram r) "coord3d") $= GL.Disabled
-    GL.vertexAttribArray (U.getAttrib (shaderProgram r) "v_color") $= GL.Disabled
+    U.asUniform (mv player) $ U.getUniform (myProgram r) "mv"
+    U.asUniform (projection screenWidthInt screenHeightInt) $ U.getUniform (myProgram r) "projection"
+    GL.drawArrays GL.Points 0 3
+    GL.vertexAttribArray (U.getAttrib (myProgram r) "coord3d") $= GL.Disabled
 
-transformM :: Int -> Int -> Player -> L.M44 GL.GLfloat
-transformM width height player = projection L.!*! view L.!*! model L.!*! anim where
-  angle      = 0 --realToFrac t * pi/4
-  anim       = L.mkTransformation (L.axisAngle (L.V3 0 1 0) angle) L.zero
+mv :: Player -> L.M44 GL.GLfloat
+mv player = view L.!*! model where
   model      = L.mkTransformationMat L.identity $ L.V3 0 0 0 --im not sure if things should be moved here, or on a per vertice levels
   view       = U.camMatrix (cam player)
-  projection = U.projectionMatrix (pi/4) aspect 0.1 1000 --last value is draw distance
+
+projection :: Int -> Int -> L.M44 GL.GLfloat
+projection width height = U.projectionMatrix (pi/4) aspect 0.1 1000 where
   aspect     = fromIntegral width / fromIntegral height
+
+
+-- | Represents the shader program and its input parameter
+data MyProgram = MyProgram {myProgram :: U.ShaderProgram, myArray :: GL.BufferObject}
+
+testVertices :: [Float]
+testVertices = [ 1,  1, 0
+               , -1, -1, 0
+               , 1, -1, 0
+           ]
 
 shaderPath :: FilePath
 shaderPath = ""--original path was  wikibook" </> "tutorial-05-3D
 
--- This does not result in the same face order as the C++ example.
--- The first 4 vertices correspond to the right (positive X) face.
-cubeVertices :: [L.V3 Float]
-cubeVertices = L.V3 <$> [1, -1] <*> [1, -1] <*> [1, -1]
+-------------------------------------------------------------------------
+-------------------------------------------------------------------------
+-------------------------------Particles---------------------------------
+-------------------------------------------------------------------------
+-------------------------------------------------------------------------
 
-monochromeColorArray :: L.V3 Float -> [L.V3 Float]
-monochromeColorArray (L.V3 r g b) = L.V3 <$> [r, r] <*> [g, g] <*> [b, b] -- color space visualization
+data Particle = Particle { particlePosition :: L.V3 Float
+                          ,particleVelocity :: L.V3 Float
+                          ,particleAcceleration :: L.V3 Float
+                          ,particleColor :: L.V3 Float
+                          ,particleTimeAlive :: Float
+                          }
+data ParticleSystem = ParticleSystem {
+  particles :: [Particle]
+  --settings :: ParticleSettings
+}
 
--- Vertices for each triangle in CCW order
-cubeIndices :: [L.V3 GL.GLuint]
-cubeIndices = [ L.V3 2 1 0 -- right
-           , L.V3 1 2 3
-           , L.V3 0 1 4 -- top
-           , L.V3 4 1 5
-           , L.V3 4 5 6 -- left
-           , L.V3 7 6 5
-           , L.V3 2 6 3 -- bottom
-           , L.V3 6 3 7
-           , L.V3 0 4 2 -- front
-           , L.V3 2 4 6
-           , L.V3 5 1 7 -- back
-           , L.V3 7 1 3
-           ]
+genParticleMesh :: [Particle] -> Mesh
+genParticleMesh particleArray =
+  Mesh newVertices newIndices newColors where
+    newVertices = map particlePosition particleArray--position of each particle
+    newColors = map particleColor particleArray--color of each particle
+    newIndices = [L.V3 0 1 2]--0 to array length
 
-cubeMesh :: Mesh
-cubeMesh = Mesh cubeVertices cubeIndices (monochromeColorArray (L.V3 0 0 0))
+createParticleSystem :: R.StdGen -> ParticleSystem
+createParticleSystem gen =
+  ParticleSystem array where
+    array = [createParticle gen | i <-[0..500]]
 
---maybe map this to (+)
---should take multiple meshes eventually, maybe has type [Mesh] -> Mesh, could be a recursion
+updateParticleSystem :: ParticleSystem -> ParticleSystem
+updateParticleSystem (ParticleSystem oldParticles) =
+  ParticleSystem newParticleArray where
+  newParticleArray = [(updateParticle (oldParticles !! i) 0.1) | i <- [0..((length oldParticles) -1)] ] --filter for particles that should be killed
 
-concatMesh :: Mesh -> Mesh -> Mesh
-concatMesh meshA meshB =
-  Mesh newV newI newC where
-    newV = vertices meshA ++ vertices meshB
-    newI = indices meshA ++ map(+ L.V3 vertCountMeshA vertCountMeshA vertCountMeshA) (indices meshB)
-      where vertCountMeshA = fromIntegral $ length (vertices meshA)
-    newC = colors meshA ++ colors meshB
+updateParticle :: Particle -> Float -> Particle
+updateParticle (Particle pPosition pVelocity b c pTimeAlive) deltaTime =
+  Particle newParticlePosition pVelocity b c newParticleTimeAlive
+           where newParticlePosition = pPosition + pVelocity
+                 newParticleTimeAlive = pTimeAlive + deltaTime
 
-transformMesh :: Mesh -> L.V3 Float -> L.V3 Float -> L.V3 Float -> Mesh
-transformMesh mesh position scale color =
-  Mesh newVertices (indices mesh) (monochromeColorArray color) where
-    newVertices = map((+ position) . (* scale))(vertices mesh)
+createParticle :: R.StdGen -> Particle
+createParticle gen =
+  Particle initPos initVelocity initAcceleration initColor initTimeAlive where
+  initPos = (randomUnitVectorGen gen) * 0
+  (_, nextGen) = R.next gen
+  initVelocity = (randomUnitVectorGen nextGen) * 0
+  initAcceleration = L.V3 0 0 0
+  initColor = L.V3 1 0 1
+  initTimeAlive = 0
 
-
-generateScene :: IO Mesh
-generateScene = do
-  initBox <- createBox
-  numBoxesMult <- randomValue
-  let numBoxes = floor (numBoxesMult * boxCount)
-  meshes <- createBoxes initBox numBoxes
-  return meshes
-
-createBoxes :: Mesh -> Int -> IO Mesh
-createBoxes ongoingMesh index = do
-    box <- createBox
-    let fullMesh = concatMesh ongoingMesh box
-    if index > 0
-        then createBoxes fullMesh (index - 1)
-        else return fullMesh
-
-createBox :: IO Mesh
-createBox = do
-  cubePosition <- randomUnitVector
-  colorLerpValue <- randomValue
-  boxScaleValue <- randomValue
-  let lerpedColor = L.lerp colorLerpValue colorRangeA colorRangeB
-  let lerpedScale = L.lerp boxScaleValue boxScaleA boxScaleB
-  let mesh = transformMesh cubeMesh (cubePosition * boxRange) lerpedScale lerpedColor
-  return mesh
-
---return vector with random values between -1 and 1
+{-
+-- | return vector with random values between -1 and 1
 randomUnitVector :: IO (L.V3 Float)
 randomUnitVector = do
   gen <- R.newStdGen
   let randoms = R.randomRs (-1,1) gen :: [Float]
-  return (L.V3 (randoms !! 0) (randoms !! 1) (randoms !! 2))--there should be a nicer way to do this
-  --return (L.V3 (V.fromList randoms))
+  return L.V3 (randoms !! 0) (randoms !! 1) (randoms !! 2)--there should be a nicer way to do this
 
---random number between 0 and 1
+
+-- | random number between 0 and 1
 randomValue :: IO Float
 randomValue = do
   gen <- R.newStdGen
   let (result, _) = R.randomR (0, 1) gen
   return result
+-}
+
+-- | return vector with random values between -1 and 1
+randomUnitVectorGen :: R.StdGen -> L.V3 Float
+randomUnitVectorGen gen = randomVector where
+  randoms = R.randomRs (-1,1) gen :: [Float]
+  randomVector = L.V3 (randoms !! 0) (randoms !! 1) (randoms !! 2)--there should be a nicer way to do this
+
+
+-- | random number between 0 and 1
+randomValueGen ::R.StdGen -> Float
+randomValueGen gen = result where
+  (result, _) = R.randomR (0, 1) gen
