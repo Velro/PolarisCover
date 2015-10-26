@@ -4,7 +4,7 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module Main (main) where
+module ParticleDemo (main) where
 
 import Prelude hiding (any, mapM_)
 import Control.Monad hiding (mapM_)
@@ -59,17 +59,8 @@ data Player = Player { cam :: U.Camera CFloat --should be Transform composed wit
                       , lastFrameInput :: PlayerInputData
                      }
 
-
--- | Represents the shader program and its input buffers
-data Resources = Resources { shaderProgram :: U.ShaderProgram
-                          , vertBuffer :: GL.BufferObject
-                          , colorBuffer :: GL.BufferObject
-                          , elementBuffer :: GL.BufferObject
-                          }--, mesh :: Mesh -- how do we include the mesh in the weird constructor
-
-data Mesh = Mesh {vertices :: [L.V3 Float]
-                 ,indices :: [L.V3 GL.GLuint]
-                 ,colors :: [L.V3 Float]
+data VBO = VBO {vertices :: [L.V3 CFloat]
+                 ,colors :: [L.V3 CFloat]
                  }
 
 main :: IO ()
@@ -95,12 +86,14 @@ main = do
   let camTwo = U.panGlobal (45) . U.tilt (-45) $ cam
   let initPlayer = Player (camTwo ) (PlayerInputData (L.V2 0 0) (L.V2 0 0))
 
+  resources <- initResources
+
   gen <- R.getStdGen
   let startParticleSystem = createParticleSystem gen
   Mix.withAudio Mix.defaultAudio 256 $ do
     --music <- Mix.load "Riddlydiddly.wav"
     --Mix.playMusic Mix.Forever music
-    loop window initPlayer 0 startParticleSystem
+    loop window initPlayer 0 startParticleSystem resources
     --Mix.free music
 
   --SDL.setRelativeMouseMode False
@@ -108,8 +101,8 @@ main = do
   SDL.quit
 
 --eventually just deltaTime, inputStruct, and entity list?
-loop :: SDL.Window -> Player -> CFloat -> ParticleSystem -> IO ()
-loop window player lastFrameTime particleSystem = do
+loop :: SDL.Window -> Player -> CFloat -> ParticleSystem -> U.ShaderProgram -> IO ()
+loop window player lastFrameTime particleSystem resources = do
   time <- SDL.time--maybe we can find this with SDL timers?
   let deltaTime = (time - lastFrameTime) `mod'` 1 --mod by 1 because the second or third frame comes up with a deltaTime in the thousands...
   let moveSpeed = deltaTime * 10
@@ -134,17 +127,15 @@ loop window player lastFrameTime particleSystem = do
   let smoothPlayer = smoothedPlayer (lastFrameInput player) rawInputs (deltaTime*0.5)
   let updatedPlayer = updatePlayer smoothPlayer mouseCoord player moveSpeed rotateSpeed
 
-  let mesh = genParticleMesh (particles particleSystem)
-  resources <- initResources
-  draw resources updatedPlayer
+  let vbo = genParticleVBO (particles particleSystem)
+  glBufferObj <- arrayToBufferObject (vertices vbo)
+  draw (Derp resources) glBufferObj vbo updatedPlayer
 
   SDL.glSwapWindow window
-  let newParticleSystem = updateParticleSystem particleSystem
-
-  let debugParticles = particles particleSystem
-  let firstParticle = debugParticles !! 0
-  --print (particlePosition firstParticle)
-  unless (quit || escapeButtonDown) (loop window updatedPlayer time newParticleSystem)
+  let newParticleSystem = updateParticleSystem particleSystem deltaTime
+  --let debugVerts = vertices mesh
+  --print (debugVerts !! 0)
+  unless (quit || escapeButtonDown) (loop window updatedPlayer time newParticleSystem resources)
 
 
 
@@ -206,30 +197,33 @@ gatherInputsRaw events =
                            | otherwise -> 0
 
 
-initResources :: IO MyProgram
+initResources :: IO U.ShaderProgram
 initResources = do
     GL.blend $= GL.Enabled
     GL.blendFunc $= (GL.SrcAlpha, GL.OneMinusSrcAlpha)
-    MyProgram <$> U.loadShaderProgram [(GL.VertexShader, "particles.v.glsl"),
+    U.loadShaderProgram [(GL.VertexShader, "particles.v.glsl"),
                                         (GL.GeometryShader, "particles.g.glsl"),
                                         (GL.FragmentShader, "particles.f.glsl")]
-              <*> U.fromSource GL.ArrayBuffer testVertices
+
+
+arrayToBufferObject :: [L.V3 CFloat] ->IO GL.BufferObject
+arrayToBufferObject arr = U.fromSource GL.ArrayBuffer arr
 
 --gl setup from http://www.geeks3d.com/20140815/particle-billboarding-with-the-geometry-shader-glsl/
-draw :: MyProgram -> Player -> IO ()
-draw r player = do
+draw :: Derp -> GL.BufferObject -> VBO -> Player -> IO ()
+draw r glBuffer (VBO vertices colors) player = do
     GL.clearColor $= GL.Color4 1 1 1 1
     GL.clear [GL.ColorBuffer, GL.DepthBuffer]
     GL.viewport $= (GL.Position 0 0, GL.Size (fromIntegral screenWidth) (fromIntegral screenHeight))
-    GL.currentProgram $= (Just . U.program . myProgram $ r)
-    U.enableAttrib (myProgram r) "coord3d"
-    GL.bindBuffer GL.ArrayBuffer $= Just (myArray r)
-    U.setAttrib (myProgram r) "coord3d"
+    GL.currentProgram $= (Just . U.program . shaderProgram $ r) --how do i do this without enclosing type?
+    U.enableAttrib (shaderProgram r) "coord3d"
+    GL.bindBuffer GL.ArrayBuffer $= Just (glBuffer)
+    U.setAttrib (shaderProgram r) "coord3d"
         GL.ToFloat $ GL.VertexArrayDescriptor 3 GL.Float 0 U.offset0
-    U.asUniform (mv player) $ U.getUniform (myProgram r) "mv"
-    U.asUniform (projection screenWidthInt screenHeightInt) $ U.getUniform (myProgram r) "projection"
-    GL.drawArrays GL.Points 0 3
-    GL.vertexAttribArray (U.getAttrib (myProgram r) "coord3d") $= GL.Disabled
+    U.asUniform (mv player) $ U.getUniform (shaderProgram r) "mv"
+    U.asUniform (projection screenWidthInt screenHeightInt) $ U.getUniform (shaderProgram r) "projection"
+    GL.drawArrays GL.Points 0 (fromIntegral (length vertices))
+    GL.vertexAttribArray (U.getAttrib (shaderProgram r) "coord3d") $= GL.Disabled
 
 mv :: Player -> L.M44 GL.GLfloat
 mv player = view L.!*! model where
@@ -240,18 +234,12 @@ projection :: Int -> Int -> L.M44 GL.GLfloat
 projection width height = U.projectionMatrix (pi/4) aspect 0.1 1000 where
   aspect     = fromIntegral width / fromIntegral height
 
-
--- | Represents the shader program and its input parameter
-data MyProgram = MyProgram {myProgram :: U.ShaderProgram, myArray :: GL.BufferObject}
-
-testVertices :: [Float]
-testVertices = [ 1,  1, 0
-               , -1, -1, 0
-               , 1, -1, 0
-           ]
-
 shaderPath :: FilePath
-shaderPath = ""--original path was  wikibook" </> "tutorial-05-3D
+shaderPath = ""--original path was  wi`kibook" </> "tutorial-05-3D
+
+data Derp = Derp {
+  shaderProgram :: U.ShaderProgram
+}
 
 -------------------------------------------------------------------------
 -------------------------------------------------------------------------
@@ -259,61 +247,75 @@ shaderPath = ""--original path was  wikibook" </> "tutorial-05-3D
 -------------------------------------------------------------------------
 -------------------------------------------------------------------------
 
-data Particle = Particle { particlePosition :: L.V3 Float
-                          ,particleVelocity :: L.V3 Float
-                          ,particleAcceleration :: L.V3 Float
-                          ,particleColor :: L.V3 Float
-                          ,particleTimeAlive :: Float
+data Particle = Particle { particlePosition :: L.V3 CFloat
+                          ,particleVelocity :: L.V3 CFloat
+                          ,particleAcceleration :: L.V3 CFloat
+                          ,particleColor :: L.V3 CFloat
+                          ,particleTimeAlive :: CFloat
                           }
 data ParticleSystem = ParticleSystem {
   particles :: [Particle]
   --settings :: ParticleSettings
 }
 
-genParticleMesh :: [Particle] -> Mesh
-genParticleMesh particleArray =
-  Mesh newVertices newIndices newColors where
+genParticleVBO :: [Particle] -> VBO
+genParticleVBO particleArray =
+  VBO newVertices newColors where
     newVertices = map particlePosition particleArray--position of each particle
     newColors = map particleColor particleArray--color of each particle
-    newIndices = [L.V3 0 1 2]--0 to array length
 
 createParticleSystem :: R.StdGen -> ParticleSystem
 createParticleSystem gen =
   ParticleSystem array where
-    array = [createParticle gen | i <-[0..500]]
+    (array, _) = createParticleArrayStart 100 gen
+    --array = [createParticle gen | i <-[0..500]]
 
-updateParticleSystem :: ParticleSystem -> ParticleSystem
-updateParticleSystem (ParticleSystem oldParticles) =
+createParticleArrayStart :: Int -> R.StdGen -> ([Particle], R.StdGen)
+createParticleArrayStart maxParticles gen =
+  createParticleArray 1 maxParticles [particle] newGen where
+  (particle, newGen) = createParticle gen
+
+createParticleArray :: Int -> Int -> [Particle] -> R.StdGen -> ([Particle], R.StdGen)
+createParticleArray count maxParticles particles gen =
+  if count < maxParticles
+  then createParticleArray (count + 1) maxParticles (newParticle:particles) newGen
+  else (particles, gen)
+  where (newParticle, newGen) = createParticle gen
+
+updateParticleSystem :: ParticleSystem -> CFloat -> ParticleSystem
+updateParticleSystem (ParticleSystem oldParticles) deltaTime =
   ParticleSystem newParticleArray where
-  newParticleArray = [(updateParticle (oldParticles !! i) 0.1) | i <- [0..((length oldParticles) -1)] ] --filter for particles that should be killed
+  newParticleArray = [(updateParticle (oldParticles !! i) deltaTime) | i <- [0..((length oldParticles) -1)] ] --filter for particles that should be killed
 
-updateParticle :: Particle -> Float -> Particle
+updateParticle :: Particle -> CFloat -> Particle
 updateParticle (Particle pPosition pVelocity b c pTimeAlive) deltaTime =
   Particle newParticlePosition pVelocity b c newParticleTimeAlive
-           where newParticlePosition = pPosition + pVelocity
+           where newParticlePosition = pPosition + velocityDelta
                  newParticleTimeAlive = pTimeAlive + deltaTime
+                 velocityDelta = v3TimesScalar pVelocity deltaTime
 
-createParticle :: R.StdGen -> Particle
+createParticle :: R.StdGen -> (Particle, R.StdGen)
 createParticle gen =
-  Particle initPos initVelocity initAcceleration initColor initTimeAlive where
-  initPos = (randomUnitVectorGen gen) * 0
-  (_, nextGen) = R.next gen
-  initVelocity = (randomUnitVectorGen nextGen) * 0
+  (Particle initPos initVelocity initAcceleration initColor initTimeAlive, gen'') where
+  initPos = (randomUnitVectorGen gen) * 5
+  (_, gen') = R.next gen
+  initVelocity = (randomUnitVectorGen gen') * 1
+  (_, gen'') = R.next gen'
   initAcceleration = L.V3 0 0 0
   initColor = L.V3 1 0 1
   initTimeAlive = 0
 
 {-
 -- | return vector with random values between -1 and 1
-randomUnitVector :: IO (L.V3 Float)
+randomUnitVector :: IO (L.V3 CFloat)
 randomUnitVector = do
   gen <- R.newStdGen
-  let randoms = R.randomRs (-1,1) gen :: [Float]
+  let randoms = R.randomRs (-1,1) gen :: [CFloat]
   return L.V3 (randoms !! 0) (randoms !! 1) (randoms !! 2)--there should be a nicer way to do this
 
 
 -- | random number between 0 and 1
-randomValue :: IO Float
+randomValue :: IO CFloat
 randomValue = do
   gen <- R.newStdGen
   let (result, _) = R.randomR (0, 1) gen
@@ -321,13 +323,13 @@ randomValue = do
 -}
 
 -- | return vector with random values between -1 and 1
-randomUnitVectorGen :: R.StdGen -> L.V3 Float
+randomUnitVectorGen :: R.StdGen -> L.V3 CFloat
 randomUnitVectorGen gen = randomVector where
-  randoms = R.randomRs (-1,1) gen :: [Float]
+  randoms = R.randomRs (-1,1) gen :: [CFloat]
   randomVector = L.V3 (randoms !! 0) (randoms !! 1) (randoms !! 2)--there should be a nicer way to do this
 
 
 -- | random number between 0 and 1
-randomValueGen ::R.StdGen -> Float
+randomValueGen ::R.StdGen -> CFloat
 randomValueGen gen = result where
   (result, _) = R.randomR (0, 1) gen

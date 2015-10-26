@@ -19,10 +19,15 @@ Library
     filepath,
     vector,
     bytestring
-  Exposed-Modules: Main, YamMath
+  Exposed-Modules: Main, ParticleDemo, YamMath
   hs-source-dirs: src
 
 Executable program1
   Main-Is:         Main.hs
   Hs-Source-Dirs:  src
   Other-Modules:   Main, YamMath
+
+Executable program2
+  Main-Is:          ParticleDemo.hs
+  Hs-Source-Dirs:   src
+  Other-Modules:    ParticleDemo, YamMath

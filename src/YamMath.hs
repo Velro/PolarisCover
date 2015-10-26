@@ -4,7 +4,8 @@ module YamMath
     v2InnerProduct,
     v2MoveTowards,
     moveTowards,
-    clampValue
+    clampValue,
+    v3TimesScalar
   ) where
 
 import qualified Linear as L
@@ -40,5 +41,7 @@ moveTowards lastValue target maxDelta =
 clampValue :: (Ord a) => a -> a -> a -> a
 clampValue mn mx = max mn . min mx
 
+v3TimesScalar :: (Num a, Ord a) => L.V3 a -> a -> L.V3 a
+v3TimesScalar (L.V3 x y z) b = L.V3 (x * b)(y * b)(z * b)
 --mapRange :: Num -> Num -> Num -> Num -> Num -> Num
 --mapRange rangeA rangeB rangeX rangeY value =
