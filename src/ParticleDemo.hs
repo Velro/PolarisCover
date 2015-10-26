@@ -7,8 +7,6 @@
 module ParticleDemo (main) where
 
 import Prelude hiding (any, mapM_)
-import Control.Monad hiding (mapM_)
-import Data.Foldable
 import Data.Maybe
 import Data.Monoid
 import Data.List as List
@@ -21,7 +19,6 @@ import qualified Data.Vector.Storable as V
 import           System.Exit (exitFailure)
 import           System.IO
 import           Control.Applicative
-import           System.FilePath ((</>))
 
 import SDL (($=))
 import qualified SDL
@@ -80,11 +77,11 @@ main = do
 
   _ <- SDL.glCreateContext window
 
-  SDL.setMouseLocationMode (SDL.RelativeLocation)
+  SDL.setMouseLocationMode SDL.RelativeLocation
 
-  let cam = U.dolly (L.V3 15 20 15) $ U.fpsCamera
-  let camTwo = U.panGlobal (45) . U.tilt (-45) $ cam
-  let initPlayer = Player (camTwo ) (PlayerInputData (L.V2 0 0) (L.V2 0 0))
+  let cam = U.dolly (L.V3 15 20 15) U.fpsCamera
+  let camTwo = U.panGlobal 45 . U.tilt (-45) $ cam
+  let initPlayer = Player camTwo (PlayerInputData (L.V2 0 0) (L.V2 0 0))
 
   resources <- initResources
 
@@ -147,15 +144,13 @@ updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) (P (L.V
     xMoveDelta =   realToFrac (moveX * moveSpeed)
     zMoveDelta =   realToFrac (moveY * moveSpeed)
     newPan = if useMouse
-                   then ((-clampedMouseRelX) * rotateSpeed)
+                   then (-clampedMouseRelX) * rotateSpeed
                    else realToFrac (-rotateX) * rotateSpeed
     newTilt = if useMouse
-                   then ((-clampedMouseRelY) * rotateSpeed)
+                   then (-clampedMouseRelY) * rotateSpeed
                    else realToFrac rotateY * rotateSpeed
-    newPos = U.rightward (oldCamera) * xMoveDelta
-           + U.forward   (oldCamera) * zMoveDelta
-           --(U.location oldCamera)
-    --movedCam =
+    newPos = U.rightward oldCamera * xMoveDelta
+           + U.forward   oldCamera * zMoveDelta
     updatedCam = if clampCamera tiltedCamera
                  then tiltedCamera
                  else nonTiltedCamera
@@ -164,9 +159,7 @@ updatePlayer (PlayerInputData (L.V2 moveX moveY) (L.V2 rotateX rotateY)) (P (L.V
 
 clampCamera :: U.Camera CFloat -> Bool
 clampCamera camera =
-  if roll > maxRoll && roll < (180 - maxRoll)
-  then False
-  else True
+  roll > maxRoll && roll < (180 - maxRoll)
   where roll = abs (eRoll (euler321OfQuat (U.orientation camera)) * 57.2957795131)
 
 --how can pattern between smoothedPlayer and v2MoveTowards be represented "the haskell way"
@@ -201,13 +194,13 @@ initResources :: IO U.ShaderProgram
 initResources = do
     GL.blend $= GL.Enabled
     GL.blendFunc $= (GL.SrcAlpha, GL.OneMinusSrcAlpha)
-    U.loadShaderProgram [(GL.VertexShader, "particles.v.glsl"),
-                                        (GL.GeometryShader, "particles.g.glsl"),
-                                        (GL.FragmentShader, "particles.f.glsl")]
+    U.loadShaderProgram [(GL.VertexShader, "shaders/particles.v.glsl"),
+                                        (GL.GeometryShader, "shaders/particles.g.glsl"),
+                                        (GL.FragmentShader, "shaders/particles.f.glsl")]
 
 
 arrayToBufferObject :: [L.V3 CFloat] ->IO GL.BufferObject
-arrayToBufferObject arr = U.fromSource GL.ArrayBuffer arr
+arrayToBufferObject = U.fromSource GL.ArrayBuffer
 
 --gl setup from http://www.geeks3d.com/20140815/particle-billboarding-with-the-geometry-shader-glsl/
 draw :: Derp -> GL.BufferObject -> VBO -> Player -> IO ()
@@ -217,7 +210,7 @@ draw r glBuffer (VBO vertices colors) player = do
     GL.viewport $= (GL.Position 0 0, GL.Size (fromIntegral screenWidth) (fromIntegral screenHeight))
     GL.currentProgram $= (Just . U.program . shaderProgram $ r) --how do i do this without enclosing type?
     U.enableAttrib (shaderProgram r) "coord3d"
-    GL.bindBuffer GL.ArrayBuffer $= Just (glBuffer)
+    GL.bindBuffer GL.ArrayBuffer $= Just glBuffer
     U.setAttrib (shaderProgram r) "coord3d"
         GL.ToFloat $ GL.VertexArrayDescriptor 3 GL.Float 0 U.offset0
     U.asUniform (mv player) $ U.getUniform (shaderProgram r) "mv"
@@ -233,9 +226,6 @@ mv player = view L.!*! model where
 projection :: Int -> Int -> L.M44 GL.GLfloat
 projection width height = U.projectionMatrix (pi/4) aspect 0.1 1000 where
   aspect     = fromIntegral width / fromIntegral height
-
-shaderPath :: FilePath
-shaderPath = ""--original path was  wi`kibook" </> "tutorial-05-3D
 
 data Derp = Derp {
   shaderProgram :: U.ShaderProgram
@@ -285,7 +275,7 @@ createParticleArray count maxParticles particles gen =
 updateParticleSystem :: ParticleSystem -> CFloat -> ParticleSystem
 updateParticleSystem (ParticleSystem oldParticles) deltaTime =
   ParticleSystem newParticleArray where
-  newParticleArray = [(updateParticle (oldParticles !! i) deltaTime) | i <- [0..((length oldParticles) -1)] ] --filter for particles that should be killed
+  newParticleArray = [updateParticle (oldParticles !! i) deltaTime | i <- [0..(length oldParticles -1)] ] --filter for particles that should be killed
 
 updateParticle :: Particle -> CFloat -> Particle
 updateParticle (Particle pPosition pVelocity b c pTimeAlive) deltaTime =
@@ -297,30 +287,13 @@ updateParticle (Particle pPosition pVelocity b c pTimeAlive) deltaTime =
 createParticle :: R.StdGen -> (Particle, R.StdGen)
 createParticle gen =
   (Particle initPos initVelocity initAcceleration initColor initTimeAlive, gen'') where
-  initPos = (randomUnitVectorGen gen) * 5
+  initPos = randomUnitVectorGen gen * 5
   (_, gen') = R.next gen
-  initVelocity = (randomUnitVectorGen gen') * 1
+  initVelocity = randomUnitVectorGen gen' * 1
   (_, gen'') = R.next gen'
   initAcceleration = L.V3 0 0 0
   initColor = L.V3 1 0 1
   initTimeAlive = 0
-
-{-
--- | return vector with random values between -1 and 1
-randomUnitVector :: IO (L.V3 CFloat)
-randomUnitVector = do
-  gen <- R.newStdGen
-  let randoms = R.randomRs (-1,1) gen :: [CFloat]
-  return L.V3 (randoms !! 0) (randoms !! 1) (randoms !! 2)--there should be a nicer way to do this
-
-
--- | random number between 0 and 1
-randomValue :: IO CFloat
-randomValue = do
-  gen <- R.newStdGen
-  let (result, _) = R.randomR (0, 1) gen
-  return result
--}
 
 -- | return vector with random values between -1 and 1
 randomUnitVectorGen :: R.StdGen -> L.V3 CFloat
